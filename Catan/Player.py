@@ -110,7 +110,7 @@ class Player:
             if expected[res] > 0:
                 prices[res] = value[res] / expected[res]
             elif value[res] > 0:
-                prices[res] = value[res] * 100 # Needed but no access
+                prices[res] = 1000  # Needed but no access
             else:
                 prices[res] = 0.0
         return prices
