@@ -1,186 +1,149 @@
+# FullEngine.py
+
 import random
 from collections import defaultdict
-from Player import Player, BUILDING_COSTS, DICE_PROBABILITIES
+from typing import List, Optional, Dict, Tuple
 
-class TradeOffer:
-    def __init__(self, giver, receiver, offer_give, offer_get):
-        self.giver = giver
-        self.receiver = receiver
-        self.offer_give = offer_give
-        self.offer_get = offer_get
+from Players import Player, RESOURCES, BUILDING_COSTS, DICE_PROBABILITIES
 
-    def __str__(self):
-        return f"{self.giver} offers {self.offer_give} to {self.receiver} in exchange for {self.offer_get}"
 
 class TradeEngine:
-    def __init__(self, players, dice_rolls=None):
-        self.players = players            # List of Player instances
-        self.dice_rolls = dice_rolls      # Optional list of predetermined dice rolls
-        self.roll_index = 0               # Next index into dice_rolls
+    def __init__(
+        self,
+        players: List[Player],
+        dice_rolls: Optional[List[int]] = None,
+        rng: Optional[random.Random] = None
+    ):
+        self.players = players
+        self.dice_rolls = dice_rolls
+        self.roll_index = 0
+        self.rng = rng or random.Random()
 
-    def _next_roll(self):
-        if self.dice_rolls is not None and self.roll_index < len(self.dice_rolls):
-            roll = self.dice_rolls[self.roll_index]
+    def _next_roll(self) -> int:
+        if self.dice_rolls and self.roll_index < len(self.dice_rolls):
+            r = self.dice_rolls[self.roll_index]
             self.roll_index += 1
-            return roll
-        # Fallback to random
-        return random.randint(1,6) + random.randint(1,6)
+            return r
+        return self.rng.randint(1, 6) + self.rng.randint(1, 6)
 
-    def generate_offer(self, player):
-        """
-        Choose one unit from surplus to offer for one unit of shortage.
-        """
-        if player.current_goal is None:
-            return None, None
-
-        shortage, surplus = player.resource_delta()
-        for want in shortage:
-            for give in surplus:
-                if player.resources[give] > 0:
-                    return {give: 1}, {want: 1}
-        return None, None
-
-    def would_accept_offer(self, receiver, offer_give, offer_get):
-        """
-        Receiver gives offer_get and receives offer_give.
-        Accept if net shadow price gain is positive.
-        """
-        prices = receiver.shadow_prices()
-        value_give = sum(prices[r] * c for r, c in offer_get.items())
-        value_get = sum(prices[r] * c for r, c in offer_give.items())
-        return value_get > value_give
-
-    def execute_trade(self, p1, p2, offer_give, offer_get):
-        # Check resources
-        for res, cnt in offer_give.items():
-            if p1.resources.get(res, 0) < cnt:
+    def execute_trade(
+        self,
+        p1: Player,
+        p2: Player,
+        give: Dict[str, int],
+        get: Dict[str, int]
+    ) -> bool:
+        for r, c in give.items():
+            if p1.resources[r] < c:
                 return False
-        for res, cnt in offer_get.items():
-            if p2.resources.get(res, 0) < cnt:
+        for r, c in get.items():
+            if p2.resources[r] < c:
                 return False
-        # Exchange
-        for res, cnt in offer_give.items():
-            p1.remove_resource(res, cnt)
-            p2.add_resource(res, cnt)
-        for res, cnt in offer_get.items():
-            p2.remove_resource(res, cnt)
-            p1.add_resource(res, cnt)
+        for r, c in give.items():
+            p1.remove_resource(r, c)
+            p2.add_resource(r, c)
+        for r, c in get.items():
+            p2.remove_resource(r, c)
+            p1.add_resource(r, c)
         return True
 
-    def attempt_build(self, player):
+    def attempt_build(self, player: Player) -> bool:
         """
         If player can build their current goal, pay cost, record building,
-        and add 3 random resource_sources (new tiles) based on type.
+        and then for settlement: add 3 new tiles;
+        for city: upgrade one existing settlement's 3 tiles to a city.
         """
-        goal = player.goal_queue[0]
-        if not goal:
+        if not player.goal_queue:
             return False
-        cost = BUILDING_COSTS[goal]
-        if all(player.resources.get(res,0) >= cnt for res,cnt in cost.items()):
-            # Pay cost
-            for res, cnt in cost.items():
-                player.remove_resource(res, cnt)
-            # Record building
-            player.buildings.append(goal)
-            player.goal_queue.pop(0)
-            # Add random tiles
-            is_city = (goal == 'city')
-            for _ in range(3):
-                res = random.choice(list(player.resources.keys()))
-                dice = random.choice(list(DICE_PROBABILITIES.keys()))
-                player.resource_sources.append((res, dice, is_city))
-            return True
-        return False
 
-    def run_trading_round(self):
-        """
-        One round: distribute resources by dice, then trading, then building.
-        """
-        # Resource distribution phase
+        goal = player.goal_queue[0]
+        cost = BUILDING_COSTS[goal]
+        # Check affordability
+        if not all(player.resources.get(r, 0) >= c for r, c in cost.items()):
+            return False
+
+        # Pay cost
+        for r, c in cost.items():
+            player.remove_resource(r, c)
+
+        # Record building
+        player.buildings.append(goal)
+        player.goal_queue.pop(0)
+
+        if goal == 'settlement':
+            # Add 3 new random settlement tiles
+            for _ in range(3):
+                res  = self.rng.choice(RESOURCES)
+                dice = self.rng.choice(list(DICE_PROBABILITIES.keys()))
+                player.resource_sources.append((res, dice, False))
+
+        elif goal == 'city':
+            # Find all settlement groups (chunks of 3 with is_city=False)
+            groups = []
+            total = len(player.resource_sources)
+            for k in range(total // 3):
+                chunk = player.resource_sources[3*k : 3*k+3]
+                if not any(is_city for (_, _, is_city) in chunk):
+                    groups.append(k)
+            if groups:
+                chosen = self.rng.choice(groups)
+                # Upgrade those 3 tiles
+                for j in range(3):
+                    res, dice, _ = player.resource_sources[3*chosen + j]
+                    player.resource_sources[3*chosen + j] = (res, dice, True)
+
+        # road or dev_card have no tile effect
+        return True
+
+    def run_trading_round(self) -> Tuple[int, List, List]:
         roll = self._next_roll()
-        print(f"\nDice roll: {roll}")
-        for player in self.players:
-            gained = defaultdict(int)
-            for (res, dice, is_city) in player.resource_sources:
+        print(f"\n--- Dice roll: {roll} ---")
+
+        # 1) Distribute resources
+        for p in self.players:
+            gains = defaultdict(int)
+            for res, dice, is_city in p.resource_sources:
                 if dice == roll:
                     amt = 2 if is_city else 1
-                    player.add_resource(res, amt)
-                    gained[res] += amt
-            if gained:
-                print(f"{player.name} gains {dict(gained)}")
+                    p.add_resource(res, amt)
+                    gains[res] += amt
+            if gains:
+                print(f"{p.name} gains {dict(gains)}")
 
-        # Trading phase
+        # 2) Trading phase
         trades = []
-        for player in self.players:
-            give, get = self.generate_offer(player)
-            if not give:
+        for p in self.players:
+            others = [o for o in self.players if o is not p]
+            offer = p.personality.propose_trade(p, others)
+            if not offer:
                 continue
-            others = [p for p in self.players if p != player]
-            random.shuffle(others)
-            for other in others:
-                if self.would_accept_offer(other, give, get):
-                    if self.execute_trade(player, other, give, get):
-                        trades.append((player.name, other.name, give, get))
+            give, get = offer
+            self.rng.shuffle(others)
+            for o in others:
+                if o.personality.accept_trade(o, give, get, p):
+                    if self.execute_trade(p, o, give, get):
+                        trades.append((p.name, o.name, give, get))
                     break
         if trades:
-            for t in trades:
-                print(f"Trade: {t[0]} -> {t[1]} gives {t[2]}, gets {t[3]}")
+            for g, r, gv, gt in trades:
+                print(f"Trade: {g} → {r} gives {gv}, gets {gt}")
         else:
-            print("No trades this round.")
+            print("No trades")
 
-        # Building phase
+        # 3) Building phase
         builds = []
-        for player in self.players:
-            if self.attempt_build(player):
-                builds.append((player.name, player.buildings[-1]))
+        for p in self.players:
+            if self.attempt_build(p):
+                builds.append((p.name, p.buildings[-1]))
         if builds:
-            for b in builds:
-                print(f"Build: {b[0]} built {b[1]}")
+            for name, b in builds:
+                print(f"Build: {name} built {b}")
         else:
-            print("No builds this round.")
+            print("No builds")
 
-        # Resource summary
-        print("Resource summary:")
-        for player in self.players:
-            print(f" {player.name}: {player.resources}")
+        # 4) Resource summary
+        print("Resources:")
+        for p in self.players:
+            print(f" {p.name}: {p.resources}")
+
         return roll, trades, builds
-
-
-def test_full_simulation():
-    # Two-player simulation with coverage of all resource types
-    alice = Player("Alice")
-    bob = Player("Bob")
-    # Initial resources and sources: ensure at least one settlement on each resource type
-    alice.resources = {'brick':1, 'lumber':1, 'grain':1, 'wool':1, 'ore':1}
-    # Alice has settlements on brick, lumber, grain
-    alice.resource_sources = [
-        ('brick', 6, False),
-        ('lumber', 8, False),
-        ('grain', 5, False)
-    ]
-    alice.goal_queue = ['settlement','road','city','dev_card']
-
-    bob.resources = {'brick':1, 'lumber':1, 'grain':1, 'wool':1, 'ore':1}
-    # Bob has settlements on wool and ore
-    bob.resource_sources = [
-        ('wool', 9, False),
-        ('ore', 10, False)
-    ]
-    bob.goal_queue = ['settlement','dev_card','road']
-
-    # Predetermined dice rolls for visibility
-    dice_seq = [6, 8, 5, 9, 10, 4, 11, 8, 5, 6]
-    engine = TradeEngine([alice, bob], dice_rolls=dice_seq)
-
-    for i in range(len(dice_seq)):
-        print(f"\n=== Round {i+1}/{len(dice_seq)} ===")
-        engine.run_trading_round()
-
-    # Final state
-    print("\n=== Final State ===")
-    for p in [alice, bob]:
-        print(f"{p.name}: resources={p.resources}, buildings={p.buildings}, sources={p.resource_sources}")
-
-if __name__ == '__main__':
-    test_full_simulation()
-

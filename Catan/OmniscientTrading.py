@@ -1,4 +1,4 @@
-from Player import Player
+from Catan.Players import Player
 
 def propose_trade(p1: Player, p2: Player):
     s1, x1 = p1.resource_delta()
